@@ -153,7 +153,7 @@ class trip_dataset(Dataset):
     return anchor.to(device),int(is_dead),positive.to(device),negative.to(device),y    
 
 
-def get_trip_loss(model,anchor,is_dead,positive,negative,y,triplet_loss,cos_em_loss=None,beta=0.5,lam=0.0,lam1=0.0,lam2=0.0,alpha=3,r=0.25):
+def get_trip_loss(model,anchor,is_dead,positive,negative,y,triplet_loss,beta,lam1,lam2,lam3,lam4,alpha=3,cos_em_loss=False):
     """
     beta : float \in (0,1)--> balances triplet loss and absorption loss
     lam: float : Uses the penalize norms of postive/negative if they are non survivors
@@ -182,7 +182,7 @@ def get_trip_loss(model,anchor,is_dead,positive,negative,y,triplet_loss,cos_em_l
     # loss2=F.mse_loss(F.mse_loss(anchor_out,torch.zeros_like(anchor_out).to(device),reduction='none').sum(dim=-1),torch.ones(anchor_out.shape[0]).to(device)*0.25,reduction='none') #B
     loss2=F.mse_loss(anchor_out,torch.zeros_like(anchor_out).to(device),reduction='none').sum(dim=-1)  #B*Z-->B
     
-    loss=loss1*(is_dead).to(device)+loss2*(1-is_dead).to(device)*lam2
+    loss=loss1*(is_dead).to(device)+loss2*(1-is_dead).to(device)*lam1
     
 
     """
@@ -191,29 +191,32 @@ def get_trip_loss(model,anchor,is_dead,positive,negative,y,triplet_loss,cos_em_l
     """
     # w_decay1=lam*((is_dead)*(1/(pos_norm+1e-1))+(1-is_dead)*1/(neg_norm+1e-1))
     
-    w_decay1=lam*((is_dead).to(device)*torch.exp(-alpha*pos_norm).to(device)+(1-is_dead).to(device)*torch.exp(-alpha*neg_norm).to(device))
+    int_loss1=lam2*((pos_norm>1.0).float().to(device)*(pos_norm)+(neg_norm>1.0).float().to(device)*(neg_norm))
+    
+    int_loss2=lam3*((is_dead).to(device)*torch.exp(-alpha*pos_norm).to(device)+(1-is_dead).to(device)*torch.exp(-alpha*neg_norm).to(device))
 
     #Now also let's penalize the norm of survivors but not as much
    
-    w_decay1+=lam*r*((is_dead).to(device)*neg_norm+(1-is_dead).to(device)*pos_norm)
+    int_loss2+=lam4*((is_dead).to(device)*neg_norm+(1-is_dead).to(device)*pos_norm)
     
     #To make sure the projected point is in the unit sphere
-    w_decay2=lam1*((pos_norm>1.0).float().to(device)*(pos_norm)+(neg_norm>1.0).float().to(device)*(neg_norm))
-    w_decay=w_decay1+w_decay2
-   
     
+    int_loss=int_loss1+int_loss2
+   
+    ### Find Contrastive loss
 
     if cos_em_loss:
-        trip_loss=(1-is_dead).to(device)*triplet_loss(anchor_out.detach(), pos_out, neg_out)+(is_dead).to(device)*cos_em_loss(anchor_out,
+        cont_loss=(1-is_dead).to(device)*triplet_loss(anchor_out.detach(), pos_out, neg_out)+(is_dead).to(device)*cos_em_loss(anchor_out,
     pos_out,y.to(device))
     else:
-        cos = nn.CosineSimilarity(dim=1, eps=1e-6)
-        trip_loss=(1-is_dead).to(device)*triplet_loss(anchor_out.detach(), 
+        #Inner Product
+        cos=(anchor_out*pos_out).sum(dim=-1)
+        cont_loss=(1-is_dead).to(device)*triplet_loss(anchor_out.detach(), 
         pos_out, neg_out)+(is_dead).to(device)*1*(cos(anchor_out,pos_out))*(1-y).to(device)
     
     # trip_loss=triplet_loss(anchor_out.detach(), pos_out, neg_out)*(pos_hzd-neg_hzd)
     # return (beta*loss+(1-beta)*trip_loss).mean()
-    return (beta*loss+(1-beta)*trip_loss+w_decay).mean()
+    return (beta*loss+(1-beta)*cont_loss+int_loss).mean()
 
 def train_epoch(model,loader,optimizer,beta,triplet_loss,cos_em_loss=None,i=0,lam=0.0,lam1=0.0,lam2=0.0,alpha=3,loss_func=get_trip_loss):
   model.train()
